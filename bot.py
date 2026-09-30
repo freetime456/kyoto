@@ -1,34 +1,53 @@
 import os
 import random
-from datetime import datetime
+from datetime import timedelta, datetime
 from zoneinfo import ZoneInfo
 
+import aiohttp
 import discord
 from discord import app_commands
-from discord.ext import commands, tasks
+from discord.ext import commands
 
-# =========================
+
+# ==================================================
 # 設定
-# =========================
+# ==================================================
 
 TOKEN = os.getenv("DISCORD_TOKEN")
 WEBHOOK_URL = os.getenv("WEBHOOK_URL")
 
+if not TOKEN:
+    raise RuntimeError("DISCORD_TOKEN が設定されていません。")
+
+JST = ZoneInfo("Asia/Tokyo")
+
+
+# ==================================================
+# Intents
+# ==================================================
+
 intents = discord.Intents.default()
+
+# 新入生検知・メンバー情報
 intents.members = True
+
+# 夜更かし職人
 intents.presences = True
-intents.message_content = True
+
+
+# ==================================================
+# Bot
+# ==================================================
 
 bot = commands.Bot(
     command_prefix="!",
     intents=intents
 )
 
-JST = ZoneInfo("Asia/Tokyo")
 
-# =========================
+# ==================================================
 # 謎の称号
-# =========================
+# ==================================================
 
 TITLES = [
     "🥔 じゃがいも担当",
@@ -53,88 +72,105 @@ TITLES = [
 
 user_titles = {}
 
-# =========================
-# Webhook
-# =========================
 
-async def send_webhook(
-    title: str,
-    description: str,
-    color: int = 0x5865F2
-):
+# ==================================================
+# Webhook
+# ==================================================
+
+async def send_webhook(title, description):
+    """
+    WEBHOOK_URL が設定されている場合だけ通知。
+    Webhookが壊れていてもBot本体を止めない。
+    """
+
     if not WEBHOOK_URL:
         return
 
+    data = {
+        "username": "じいちゃん学園Bot",
+        "embeds": [
+            {
+                "title": title,
+                "description": description,
+                "timestamp": datetime.now(JST).isoformat()
+            }
+        ]
+    }
+
     try:
-        async with discord.ClientSession() as session:
-            webhook = discord.Webhook.from_url(
+        timeout = aiohttp.ClientTimeout(total=10)
+
+        async with aiohttp.ClientSession(
+            timeout=timeout
+        ) as session:
+
+            async with session.post(
                 WEBHOOK_URL,
-                session=session
-            )
+                json=data
+            ) as response:
 
-            embed = discord.Embed(
-                title=title,
-                description=description,
-                color=color,
-                timestamp=datetime.now(JST)
-            )
-
-            await webhook.send(
-                embed=embed,
-                username="じいちゃん学園Bot"
-            )
+                if response.status >= 400:
+                    print(
+                        f"Webhook error: HTTP {response.status}"
+                    )
 
     except Exception as e:
-        print(f"Webhook error: {e}")
+        print(f"Webhook送信失敗: {e}")
 
 
-# =========================
-# Bot起動
-# =========================
+# ==================================================
+# 起動
+# ==================================================
 
 @bot.event
 async def on_ready():
+
+    print("=" * 40)
     print(f"ログイン成功: {bot.user}")
+    print(f"Bot ID: {bot.user.id}")
+    print(f"サーバー数: {len(bot.guilds)}")
+    print("=" * 40)
 
     try:
         synced = await bot.tree.sync()
         print(f"スラッシュコマンド同期: {len(synced)}個")
+
     except Exception as e:
         print(f"コマンド同期エラー: {e}")
 
-    if not night_watch.is_running():
-        night_watch.start()
 
-
-# =========================
+# ==================================================
 # 新入生
-# =========================
+# ==================================================
 
 @bot.event
 async def on_member_join(member):
+
     print(f"新入生: {member}")
 
     await send_webhook(
         "🎒 新入生入学",
-        f"{member.mention} がじいちゃん学園に入学しました！",
-        0x57F287
+        f"{member.mention} がじいちゃん学園に入学しました！"
     )
 
 
-# =========================
+# ==================================================
 # 生活指導
-# =========================
+# ==================================================
 
 @bot.tree.command(
     name="warn",
     description="生活指導を行います"
 )
-@app_commands.checks.has_permissions(moderate_members=True)
+@app_commands.checks.has_permissions(
+    moderate_members=True
+)
 async def warn(
     interaction: discord.Interaction,
     member: discord.Member,
     reason: str = "理由なし"
 ):
+
     await interaction.response.send_message(
         f"⚠️ **生活指導**\n"
         f"{member.mention}\n"
@@ -143,198 +179,305 @@ async def warn(
 
     await send_webhook(
         "⚠️ 生活指導",
-        f"{member} に生活指導\n理由：{reason}",
-        0xFEE75C
+        f"{member.mention}\n理由：{reason}"
     )
 
 
-# =========================
-# 廊下に立ってろ
-# =========================
+# ==================================================
+# 廊下に立ってろ！
+# ==================================================
 
 @bot.tree.command(
     name="timeout",
-    description="廊下に立ってろ！"
+    description="生徒を廊下に立たせます"
 )
-@app_commands.checks.has_permissions(moderate_members=True)
+@app_commands.checks.has_permissions(
+    moderate_members=True
+)
 async def timeout(
     interaction: discord.Interaction,
     member: discord.Member,
     minutes: int = 10
 ):
-    duration = discord.utils.utcnow() + __import__("datetime").timedelta(
-        minutes=minutes
-    )
 
-    await member.timeout(
-        duration,
-        reason="じいちゃん学園：廊下に立ってろ！"
-    )
+    if minutes < 1 or minutes > 40320:
+        await interaction.response.send_message(
+            "⏰ 1〜40320分で指定してください。",
+            ephemeral=True
+        )
+        return
 
-    await interaction.response.send_message(
-        f"🔇 **廊下に立ってろ！**\n"
-        f"{member.mention}\n"
-        f"{minutes}分間です。"
-    )
+    try:
 
-    await send_webhook(
-        "🔇 廊下に立ってろ！",
-        f"{member} が廊下送りになりました。\n期間：{minutes}分",
-        0xED4245
-    )
+        until = discord.utils.utcnow() + timedelta(
+            minutes=minutes
+        )
+
+        await member.timeout(
+            until,
+            reason="じいちゃん学園：廊下に立ってろ！"
+        )
+
+        await interaction.response.send_message(
+            f"🔇 **廊下に立ってろ！**\n"
+            f"{member.mention}\n"
+            f"{minutes}分間"
+        )
+
+        await send_webhook(
+            "🔇 廊下に立ってろ！",
+            f"{member.mention}\n期間：{minutes}分"
+        )
+
+    except discord.Forbidden:
+
+        await interaction.response.send_message(
+            "❌ Botの権限が足りません。",
+            ephemeral=True
+        )
+
+    except Exception as e:
+
+        print(f"Timeout error: {e}")
+
+        await interaction.response.send_message(
+            "❌ タイムアウトに失敗しました。",
+            ephemeral=True
+        )
 
 
-# =========================
+# ==================================================
 # 早退
-# =========================
+# ==================================================
 
 @bot.tree.command(
     name="kick",
     description="生徒を早退させます"
 )
-@app_commands.checks.kick_members()
+@app_commands.checks.has_permissions(
+    kick_members=True
+)
 async def kick(
     interaction: discord.Interaction,
     member: discord.Member,
     reason: str = "理由なし"
 ):
-    await member.kick(reason=reason)
 
-    await interaction.response.send_message(
-        f"👢 **早退**\n"
-        f"{member} が早退しました。\n"
-        f"理由：{reason}"
-    )
+    try:
 
-    await send_webhook(
-        "👢 早退",
-        f"{member} が早退しました。\n理由：{reason}",
-        0xED4245
-    )
+        await member.kick(reason=reason)
+
+        await interaction.response.send_message(
+            f"👢 **早退**\n"
+            f"{member}\n"
+            f"理由：{reason}"
+        )
+
+        await send_webhook(
+            "👢 早退",
+            f"{member}\n理由：{reason}"
+        )
+
+    except discord.Forbidden:
+
+        await interaction.response.send_message(
+            "❌ Botの権限が足りません。",
+            ephemeral=True
+        )
 
 
-# =========================
+# ==================================================
 # 卒業
-# =========================
+# ==================================================
 
 @bot.tree.command(
     name="ban",
     description="生徒を卒業させます"
 )
-@app_commands.checks.ban_members()
+@app_commands.checks.has_permissions(
+    ban_members=True
+)
 async def ban(
     interaction: discord.Interaction,
     member: discord.Member,
     reason: str = "理由なし"
 ):
-    await member.ban(reason=reason)
 
-    await interaction.response.send_message(
-        f"🎓 **卒業**\n"
-        f"{member} はじいちゃん学園を卒業しました。\n"
-        f"理由：{reason}"
-    )
-
-    await send_webhook(
-        "🎓 卒業",
-        f"{member} が卒業しました。\n理由：{reason}",
-        0xED4245
-    )
-
-
-# =========================
-# 再入学
-# =========================
-
-@bot.tree.command(
-    name="unban",
-    description="生徒を再入学させます"
-)
-@app_commands.checks.ban_members()
-async def unban(
-    interaction: discord.Interaction,
-    user_id: str
-):
     try:
-        user = await bot.fetch_user(int(user_id))
-        await interaction.guild.unban(user)
+
+        await member.ban(reason=reason)
 
         await interaction.response.send_message(
-            f"🔓 **再入学**\n{user} が再入学しました！"
+            f"🎓 **卒業**\n"
+            f"{member}\n"
+            f"理由：{reason}"
         )
 
         await send_webhook(
-            "🔓 再入学",
-            f"{user} がじいちゃん学園に再入学しました。",
-            0x57F287
+            "🎓 卒業",
+            f"{member}\n理由：{reason}"
         )
 
-    except Exception as e:
+    except discord.Forbidden:
+
         await interaction.response.send_message(
-            f"❌ 再入学に失敗しました。\n`{e}`",
+            "❌ Botの権限が足りません。",
             ephemeral=True
         )
 
 
-# =========================
+# ==================================================
+# 再入学
+# ==================================================
+
+@bot.tree.command(
+    name="unban",
+    description="卒業した生徒を再入学させます"
+)
+@app_commands.checks.has_permissions(
+    ban_members=True
+)
+async def unban(
+    interaction: discord.Interaction,
+    user_id: str
+):
+
+    try:
+
+        user = await bot.fetch_user(
+            int(user_id)
+        )
+
+        await interaction.guild.unban(
+            user,
+            reason="じいちゃん学園：再入学"
+        )
+
+        await interaction.response.send_message(
+            f"🔓 **再入学**\n"
+            f"{user.mention if hasattr(user, 'mention') else user}"
+        )
+
+        await send_webhook(
+            "🔓 再入学",
+            f"{user} が再入学しました！"
+        )
+
+    except ValueError:
+
+        await interaction.response.send_message(
+            "❌ User IDが正しくありません。",
+            ephemeral=True
+        )
+
+    except discord.NotFound:
+
+        await interaction.response.send_message(
+            "❌ そのユーザーはBANされていません。",
+            ephemeral=True
+        )
+
+    except discord.Forbidden:
+
+        await interaction.response.send_message(
+            "❌ Botの権限が足りません。",
+            ephemeral=True
+        )
+
+    except Exception as e:
+
+        print(f"Unban error: {e}")
+
+        await interaction.response.send_message(
+            "❌ 再入学に失敗しました。",
+            ephemeral=True
+        )
+
+
+# ==================================================
 # 黒板消去
-# =========================
+# ==================================================
 
 @bot.tree.command(
     name="clear",
     description="メッセージを黒板消去します"
 )
-@app_commands.checks.has_permissions(manage_messages=True)
+@app_commands.checks.has_permissions(
+    manage_messages=True
+)
 async def clear(
     interaction: discord.Interaction,
     amount: int = 10
 ):
+
     if amount < 1 or amount > 100:
+
         await interaction.response.send_message(
-            "1〜100件で指定してください。",
+            "❌ 1〜100件で指定してください。",
+            ephemeral=True
+        )
+        return
+
+    if not isinstance(
+        interaction.channel,
+        discord.TextChannel
+    ):
+
+        await interaction.response.send_message(
+            "❌ この場所では使えません。",
             ephemeral=True
         )
         return
 
     await interaction.response.defer()
 
-    deleted = await interaction.channel.purge(
-        limit=amount
-    )
+    try:
 
-    await interaction.followup.send(
-        f"🧹 **黒板消去**\n"
-        f"{len(deleted)}件のメッセージを消去しました。"
-    )
+        deleted = await interaction.channel.purge(
+            limit=amount
+        )
+
+        await interaction.followup.send(
+            f"🧹 **黒板消去**\n"
+            f"{len(deleted)}件を消去しました。"
+        )
+
+    except discord.Forbidden:
+
+        await interaction.followup.send(
+            "❌ Botにメッセージ管理権限がありません。"
+        )
 
 
-# =========================
+# ==================================================
 # 校内放送
-# =========================
+# ==================================================
 
 @bot.tree.command(
     name="announce",
     description="校内放送を行います"
 )
-@app_commands.checks.has_permissions(mention_everyone=True)
+@app_commands.checks.has_permissions(
+    mention_everyone=True
+)
 async def announce(
     interaction: discord.Interaction,
     message: str
 ):
+
     await interaction.response.send_message(
         f"📢 **校内放送**\n\n{message}"
     )
 
     await send_webhook(
         "📢 校内放送",
-        message,
-        0x5865F2
+        message
     )
 
 
-# =========================
+# ==================================================
 # 謎の称号
-# =========================
+# ==================================================
 
 @bot.tree.command(
     name="title",
@@ -343,6 +486,7 @@ async def announce(
 async def title(
     interaction: discord.Interaction
 ):
+
     new_title = random.choice(TITLES)
 
     user_titles[interaction.user.id] = new_title
@@ -355,18 +499,19 @@ async def title(
     )
 
 
-# =========================
+# ==================================================
 # 称号確認
-# =========================
+# ==================================================
 
 @bot.tree.command(
     name="titlecheck",
-    description="自分の称号を確認します"
+    description="現在の称号を確認します"
 )
 async def titlecheck(
     interaction: discord.Interaction
 ):
-    title = user_titles.get(
+
+    current = user_titles.get(
         interaction.user.id,
         "🎒 永遠の新入生"
     )
@@ -374,117 +519,157 @@ async def titlecheck(
     await interaction.response.send_message(
         f"🏆 **現在の称号**\n"
         f"{interaction.user.mention}\n"
-        f"## {title}"
+        f"## {current}"
     )
 
 
-# =========================
+# ==================================================
 # 夜更かし職人
-# =========================
+# ==================================================
 
-night_status = {}
+@bot.event
+async def on_presence_update(
+    before,
+    after
+):
 
+    try:
 
-@tasks.loop(minutes=1)
-async def night_watch():
-    now = datetime.now(JST)
+        # Bot自身は無視
+        if after.bot:
+            return
 
-    # 午前3時〜4時59分
-    is_night = 3 <= now.hour < 5
+        # 変更前もオンラインなら何もしない
+        if before.status != discord.Status.offline:
+            return
 
-    if not is_night:
-        return
+        # 変更後がオフラインなら何もしない
+        if after.status == discord.Status.offline:
+            return
 
-    for guild in bot.guilds:
-        for member in guild.members:
+        now = datetime.now(JST)
 
-            if member.bot:
-                continue
+        # 午前3:00〜4:59
+        if not (3 <= now.hour < 5):
+            return
 
-            online = member.status != discord.Status.offline
-            previous = night_status.get(member.id, False)
+        guild = after.guild
 
-            # オンラインになった瞬間
-            if online and not previous:
+        role = discord.utils.get(
+            guild.roles,
+            name="🌙 夜更かし職人"
+        )
 
-                role = discord.utils.get(
-                    guild.roles,
-                    name="🌙 夜更かし職人"
+        # ロールがなければ作る
+        if role is None:
+
+            try:
+
+                role = await guild.create_role(
+                    name="🌙 夜更かし職人",
+                    reason="夜更かし職人システム"
                 )
 
-                if role is None:
-                    try:
-                        role = await guild.create_role(
-                            name="🌙 夜更かし職人",
-                            reason="夜更かし職人システム"
-                        )
-                    except Exception as e:
-                        print(f"Role creation error: {e}")
-                        continue
+            except discord.Forbidden:
 
-                try:
-                    if role not in member.roles:
-                        await member.add_roles(
-                            role,
-                            reason="夜更かし職人"
-                        )
+                print(
+                    "夜更かし職人ロールを作成できません。"
+                    "Botにロール管理権限が必要です。"
+                )
 
-                    await send_webhook(
-                        "🌙 夜更かし職人検知",
-                        f"{member.mention} が午前3時台〜4時台にオンラインです。",
-                        0x5865F2
-                    )
+                return
 
-                except Exception as e:
-                    print(f"Night watch error: {e}")
+        # すでに持っていたら終了
+        if role in after.roles:
+            return
 
-            night_status[member.id] = online
+        try:
+
+            await after.add_roles(
+                role,
+                reason="夜更かし職人"
+            )
+
+            print(
+                f"夜更かし職人: {after}"
+            )
+
+            await send_webhook(
+                "🌙 夜更かし職人",
+                f"{after.mention} が午前{now.hour}:{now.minute:02d}にログインしました。"
+            )
+
+        except discord.Forbidden:
+
+            print(
+                "夜更かし職人ロールを付与できません。"
+                "Botのロール位置を確認してください。"
+            )
+
+    except Exception as e:
+
+        print(
+            f"Presence error: {e}"
+        )
 
 
-# =========================
-# エラー処理
-# =========================
+# ==================================================
+# コマンドエラー
+# ==================================================
 
 @bot.tree.error
-async def on_app_command_error(
-    interaction: discord.Interaction,
+async def command_error(
+    interaction,
     error
 ):
+
+    print(
+        f"Command error: {repr(error)}"
+    )
+
     if isinstance(
         error,
         app_commands.errors.MissingPermissions
     ):
-        message = "🚫 校則により、このコマンドは使えません。"
 
-    elif isinstance(
-        error,
-        app_commands.errors.CheckFailure
-    ):
-        message = "🚫 権限がありません。"
-
-    else:
-        print(f"Command error: {error}")
-        message = "❌ コマンド実行中にエラーが発生しました。"
-
-    if interaction.response.is_done():
-        await interaction.followup.send(
-            message,
-            ephemeral=True
-        )
-    else:
-        await interaction.response.send_message(
-            message,
-            ephemeral=True
+        message = (
+            "🚫 校則違反防止システム："
+            "権限がありません。"
         )
 
+    else:
 
-# =========================
+        message = (
+            "❌ コマンドでエラーが発生しました。"
+        )
+
+    try:
+
+        if interaction.response.is_done():
+
+            await interaction.followup.send(
+                message,
+                ephemeral=True
+            )
+
+        else:
+
+            await interaction.response.send_message(
+                message,
+                ephemeral=True
+            )
+
+    except Exception as e:
+
+        print(
+            f"Error handler error: {e}"
+        )
+
+
+# ==================================================
 # 起動
-# =========================
+# ==================================================
 
-if not TOKEN:
-    raise RuntimeError(
-        "DISCORD_TOKEN が設定されていません。"
-    )
+print("じいちゃん学園Bot 起動中...")
 
 bot.run(TOKEN)
